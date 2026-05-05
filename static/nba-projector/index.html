@@ -1,0 +1,803 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>NBA Final Score Projector — Hitesh Kumar</title>
+<meta name="description" content="Live NBA final-score projector. 17 regression and piecewise-polynomial models trained on 14 seasons of real NBA team-game data, with home-court advantage and team-history toggles." />
+<meta property="og:title" content="NBA Final Score Projector" />
+<meta property="og:description" content="Project an NBA team's final score from current score, minutes elapsed, home-court, and team history — 17 models side by side." />
+<meta property="og:type" content="website" />
+<link rel="canonical" href="https://hiteshkumar.vercel.app/nba-projector/" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #181b22; --panel-2: #20242d; --line: #2a2f3a;
+    --text: #e6e8ee; --muted: #8a92a3; --accent: #ff7849;
+    --teamA: #4ea8ff; --teamB: #ff5d73; --good: #5fd38a; --warn: #ffce5a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--text);
+    padding: 24px; line-height: 1.4;
+  }
+  a { color: var(--accent); }
+  .container { max-width: 1180px; margin: 0 auto; }
+  .crumbs { font-size: 12px; color: var(--muted); margin-bottom: 12px; }
+  .crumbs a { color: var(--muted); text-decoration: none; }
+  .crumbs a:hover { color: var(--text); }
+  h1 { margin: 0 0 4px; font-size: 26px; }
+  .sub { color: var(--muted); margin-bottom: 16px; font-size: 14px; }
+  .meta-bar {
+    display: flex; gap: 18px; flex-wrap: wrap; padding: 10px 14px;
+    background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 8px; margin-bottom: 18px; font-size: 12px; color: var(--muted);
+  }
+  .meta-bar strong { color: var(--text); font-weight: 500; }
+
+  .controls-row {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px;
+  }
+  .toggle-card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 12px 14px;
+  }
+  .toggle-card label { display:block; font-size:11px; text-transform:uppercase; color:var(--muted); letter-spacing:0.5px; margin-bottom:8px; }
+  .seg {
+    display: inline-flex; background: var(--panel-2); border:1px solid var(--line);
+    border-radius: 6px; overflow: hidden;
+  }
+  .seg button {
+    border: none; background: transparent; color: var(--muted);
+    padding: 6px 12px; font-size: 13px; cursor: pointer; font-family: inherit;
+  }
+  .seg button.active { background: var(--accent); color: #1a1a1a; }
+  .seg button:hover:not(.active) { color: var(--text); }
+
+  .grid-teams { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+  .team-card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 16px; position: relative;
+  }
+  .team-card.a { border-top: 3px solid var(--teamA); }
+  .team-card.b { border-top: 3px solid var(--teamB); }
+  .team-card.home::after {
+    content: "🏠 HOME"; position: absolute; top: 12px; right: 14px;
+    font-size: 10px; letter-spacing: 0.6px; color: var(--good);
+    background: rgba(95,211,138,0.12); padding: 2px 8px; border-radius: 4px;
+  }
+  .team-card label { display: block; font-size:12px; text-transform:uppercase; color:var(--muted); letter-spacing:0.5px; margin-bottom:4px; }
+  .team-card select, .team-card input, .time-card input[type="number"] {
+    width: 100%; background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px;
+    font-size: 15px; margin-bottom: 12px; font-family: inherit;
+  }
+  .team-card .ppg-hint { color: var(--muted); font-size: 12px; margin-top: -6px; margin-bottom: 10px; }
+
+  .time-card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 16px; margin-bottom: 16px;
+  }
+  .time-card label { display:block; font-size:12px; text-transform:uppercase; color:var(--muted); letter-spacing:0.5px; margin-bottom:8px; }
+  .time-row { display: grid; grid-template-columns: 1fr 110px; gap: 12px; align-items: center; }
+  .time-card input[type="range"] { width: 100%; accent-color: var(--accent); }
+  .time-context { color: var(--muted); font-size: 13px; margin-top: 6px; }
+  .time-context strong { color: var(--text); }
+
+  .results { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 18px; }
+  .result {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 14px; text-align: center;
+  }
+  .result.a { border-top: 3px solid var(--teamA); }
+  .result.b { border-top: 3px solid var(--teamB); }
+  .result.total { border-top: 3px solid var(--accent); }
+  .result .label { font-size: 11px; text-transform: uppercase; color: var(--muted); letter-spacing: 0.5px; }
+  .result .value { font-size: 38px; font-weight: 600; margin-top: 4px; }
+  .result .delta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+  .panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 16px; margin-bottom: 16px;
+  }
+  .panel h3 { margin:0 0 12px; font-size:13px; color:var(--muted); text-transform:uppercase; letter-spacing:0.5px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: right; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; }
+  tr.recommended td { background: rgba(255, 120, 73, 0.08); }
+  tr.recommended td:first-child::before { content: "★ "; color: var(--accent); }
+  td.mae { color: var(--muted); font-size: 12px; }
+
+  canvas { background: var(--panel-2); border-radius: 8px; padding: 8px; }
+  .footnote { color: var(--muted); font-size: 12px; margin-top: 16px; line-height: 1.6; }
+  .footnote code { background: var(--panel-2); padding: 1px 5px; border-radius: 3px; font-size: 11px; }
+  .notice {
+    background: rgba(78,168,255,0.07); border: 1px solid rgba(78,168,255,0.25);
+    border-radius: 8px; padding: 12px 14px; margin-bottom: 16px;
+    font-size: 13px; color: var(--text);
+  }
+  .notice b { color: var(--teamA); }
+
+  @media (max-width: 720px) {
+    .grid-teams, .results, .controls-row { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="crumbs"><a href="/">← Hitesh Kumar</a> &nbsp;/&nbsp; NBA Score Projector</div>
+  <h1>NBA Final Score Projector — Multi-Model</h1>
+  <div class="sub">17 regression and piecewise-polynomial models trained on 14 seasons of real NBA data, with home-court and team-history controls. Loaded models last refreshed: <span id="lastUpdated">—</span>.</div>
+
+  <div class="meta-bar" id="metaBar"></div>
+
+  <div class="notice">
+    <b>Models refresh on a schedule.</b> The background pipeline (in <code>/nba-projector/pipeline/</code>) re-pulls real NBA team-game data and refits all models. The live scoreboard fetch and play-by-play paste below let you pipe in real game dynamics. See "Data Refresh Pipeline" below for cron / GitHub Actions setup.
+  </div>
+
+  <div class="panel">
+    <h3>Live Game Data</h3>
+    <div style="display:grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items:center; margin-bottom:10px;">
+      <button id="fetchLiveBtn" style="background:var(--accent); color:#1a1a1a; border:none; padding:8px 14px; border-radius:6px; font-family:inherit; font-size:13px; cursor:pointer; font-weight:600;">↻ Fetch live games</button>
+      <select id="liveGameSelect" style="background:var(--panel-2); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:8px 10px; font-size:13px;">
+        <option value="">— click "Fetch live games" first —</option>
+      </select>
+      <div id="liveStatus" style="font-size:12px; color:var(--muted);">idle</div>
+    </div>
+    <details>
+      <summary style="font-size:12px; color:var(--muted); cursor:pointer; margin-bottom:6px;">
+        Or paste play-by-play text (from ESPN GameCast / NBA.com box score)
+      </summary>
+      <textarea id="pbpInput" placeholder="Paste PBP lines like:&#10;Q1 11:42  LeBron James makes 3pt jumper  3-0&#10;Q1 11:18  Stephen Curry makes 2pt layup  3-2&#10;..." style="width:100%; min-height:90px; background:var(--panel-2); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:8px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:11px; margin-top:6px;"></textarea>
+      <div style="display:flex; gap:8px; align-items:center; margin-top:8px;">
+        <button id="parsePbpBtn" style="background:var(--panel-2); color:var(--text); border:1px solid var(--line); padding:6px 12px; border-radius:6px; font-family:inherit; font-size:12px; cursor:pointer;">Parse PBP</button>
+        <span id="pbpStatus" style="font-size:12px; color:var(--muted);">no PBP loaded</span>
+      </div>
+    </details>
+    <div class="footnote" style="margin-top:10px;">
+      Live fetch hits ESPN's public scoreboard and the NBA's CDN. Some networks block these — if so, paste the PBP from any box-score page instead. Once PBP is parsed, the "Use last N min" mode below uses real per-minute scoring slopes for the projection.
+    </div>
+  </div>
+
+  <div class="controls-row">
+    <div class="toggle-card">
+      <label>Home court</label>
+      <div class="seg" id="homeToggle">
+        <button data-val="A">Team A home</button>
+        <button data-val="B">Team B home</button>
+        <button data-val="N" class="active">Neutral</button>
+      </div>
+      <div class="footnote" style="margin-top:6px;">Adds <span id="hcaPts">+2.5</span> projected pts to the home team.</div>
+    </div>
+    <div class="toggle-card">
+      <label>Team prior (which history window?)</label>
+      <div class="seg" id="priorToggle">
+        <button data-val="ppg_recent5" class="active">Recent 5 seasons</button>
+        <button data-val="ppg_weighted">Weighted (recent-heavy)</button>
+        <button data-val="ppg_overall">Full 14-season</button>
+      </div>
+      <div class="footnote" style="margin-top:6px;">Recent = responsive to current rosters. Full = most stable.</div>
+    </div>
+  </div>
+
+  <div class="controls-row">
+    <div class="toggle-card">
+      <label>Projection mode</label>
+      <div class="seg" id="modeToggle">
+        <button data-val="full"   class="active">Whole-game pace</button>
+        <button data-val="last10">Last 10 min only</button>
+        <button data-val="last5"> Last 5 min only</button>
+      </div>
+      <div class="footnote" style="margin-top:6px;">"Last N min" projects from the recent slope only — useful when one team is heating up. Best with PBP data loaded.</div>
+    </div>
+    <div class="toggle-card">
+      <label>Models to show</label>
+      <div class="seg" id="modelGroupToggle">
+        <button data-val="all"      class="active">All 17+</button>
+        <button data-val="best5">  Top 5 by MAE</button>
+        <button data-val="piecewise">Piecewise only</button>
+      </div>
+      <div class="footnote" style="margin-top:6px;">Filters the table and chart. Best-by-MAE row stays visible.</div>
+    </div>
+  </div>
+
+  <div class="grid-teams">
+    <div class="team-card a" id="cardA">
+      <label>Team A</label>
+      <select id="teamA"></select>
+      <div class="ppg-hint" id="teamAHint"></div>
+      <label>Current Score</label>
+      <input type="number" id="scoreA" min="0" value="14" />
+    </div>
+    <div class="team-card b" id="cardB">
+      <label>Team B</label>
+      <select id="teamB"></select>
+      <div class="ppg-hint" id="teamBHint"></div>
+      <label>Current Score</label>
+      <input type="number" id="scoreB" min="0" value="12" />
+    </div>
+  </div>
+
+  <div class="time-card">
+    <label>Minutes Elapsed (0 – 48)</label>
+    <div class="time-row">
+      <input type="range" id="timeSlider" min="0" max="48" step="0.5" value="6" />
+      <input type="number" id="timeInput" min="0" max="48" step="0.5" value="6" />
+    </div>
+    <div class="time-context" id="timeCtx"></div>
+  </div>
+
+  <div class="results">
+    <div class="result a">
+      <div class="label">Team A Projected (best model)</div>
+      <div class="value" id="projA">—</div>
+      <div class="delta" id="deltaA"></div>
+    </div>
+    <div class="result b">
+      <div class="label">Team B Projected (best model)</div>
+      <div class="value" id="projB">—</div>
+      <div class="delta" id="deltaB"></div>
+    </div>
+    <div class="result total">
+      <div class="label">Projected Total</div>
+      <div class="value" id="projTotal">—</div>
+      <div class="delta" id="deltaTotal"></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h3>All Models — Live Predictions vs Held-Out Accuracy</h3>
+    <table>
+      <thead>
+        <tr><th>Model</th><th>Team A</th><th>Team B</th><th>Total</th><th>MAE</th><th>RMSE</th></tr>
+      </thead>
+      <tbody id="modelTable"></tbody>
+    </table>
+    <div class="footnote">
+      MAE/RMSE measured on a held-out 20% of 96,000 simulated minute-snapshots
+      from 4,000 games drawn from the real 2010–2024 PPG distribution.
+      The recommended (★) model is the one with lowest held-out MAE.
+      Home-court advantage is added on top of the model output.
+    </div>
+  </div>
+
+  <div class="panel">
+    <h3>Projected Score Progression — All Models</h3>
+    <canvas id="chart" height="320"></canvas>
+  </div>
+
+  <div class="panel">
+    <h3>How the Models Work</h3>
+    <div class="footnote">
+      <b>Global models</b><br/>
+      <b>· Naive linear:</b> <code>final = current × 48 / minute</code>. Over-reacts early.<br/>
+      <b>· Linear regression:</b> <code>final ≈ a·minute + b·current + c·team_ppg + d</code>.<br/>
+      <b>· Polynomial deg 2/3/4 + ridge:</b> Adds interaction & curvature terms (e.g., <code>minute²·current</code>, <code>current³</code>). One global polynomial over the full 0–48 minute domain.<br/><br/>
+      <b>Piecewise models</b> — split the time domain into K segments and fit a separate polynomial in each.<br/>
+      <b>· Piecewise LINEAR — 2 / 3 / 4 segments at uniform knots:</b> Halves ([24]), thirds ([16, 32]), and quarters ([12, 24, 36]).<br/>
+      <b>· Piecewise POLY-2 / POLY-3 — 4 segments (quarters):</b> Quadratic and cubic per quarter, capturing within-quarter curvature.<br/>
+      <b>· Piecewise — data-driven knots:</b> Brute-force knot search picking breakpoints that minimize MAE.<br/><br/>
+      <b>Adjustments applied on top of the model output</b><br/>
+      <b>· Home-court advantage (HCA):</b> +<span id="hcaInline">2.5</span> pts added to the home team's projected final. Long-run NBA HCA estimate.<br/>
+      <b>· History window:</b> the team's <code>team_ppg</code> input is set from the chosen prior — recent-5, weighted, or full 14-season — letting you tune how reactive the projection is to current-roster strength vs long-run norm.<br/><br/>
+      Team PPG priors come from 33,316 real NBA team-game finals (2010–2024) at <code>github.com/NocturneBear/NBA-Data-2010-2024</code>.
+    </div>
+  </div>
+
+  <div class="panel">
+    <h3>Data Refresh Pipeline</h3>
+    <div class="footnote">
+      Files live under <code>/nba-projector/</code>. The training pipeline is at
+      <code>/nba-projector/pipeline/build_models.py</code> and refreshes via
+      <code>/nba-projector/pipeline/update.sh</code>:
+      <ol style="margin-top:6px;">
+        <li>Pulls the latest NBA team-game CSV from the source GitHub repo.</li>
+        <li>Recomputes per-team priors (recent 5, weighted, overall).</li>
+        <li>Simulates minute-level trajectories from the new PPG distribution.</li>
+        <li>Refits all 17 models, writes <code>models.js</code> + <code>data/models.json</code>.</li>
+        <li>Commits + pushes; Vercel rebuilds the page automatically.</li>
+      </ol>
+      Recommended cadence: weekly during the season, monthly off-season. See
+      <code>/nba-projector/pipeline/README.md</code> for cron / GitHub Actions setup.
+    </div>
+  </div>
+</div>
+
+<script src="./models.js"></script>
+
+<script>
+const M       = window.MODELS;
+const GAME    = 48;
+const SHRINK_K = M.metadata.shrink_k;
+const HCA_PTS  = M.metadata.home_advantage_pts;
+
+let priorField = "ppg_recent5";   // current selection from prior toggle
+let homeTeam   = "N";              // "A", "B", or "N"
+let projMode   = "full";           // "full", "last10", "last5"
+let modelGroup = "all";            // "all", "best5", "piecewise"
+let pbpData    = null;             // {minute_to_scoreA: [...], minute_to_scoreB: [...]} once parsed
+
+document.getElementById("hcaPts").textContent = "+" + HCA_PTS.toFixed(1);
+document.getElementById("hcaInline").textContent = HCA_PTS.toFixed(1);
+document.getElementById("lastUpdated").textContent = M.metadata.last_updated || "—";
+
+// ---------- Meta bar ----------
+const meta = M.metadata;
+document.getElementById("metaBar").innerHTML =
+  `<span><strong>${meta.n_real_team_games.toLocaleString()}</strong> real team-game rows</span>` +
+  `<span>·</span><span><strong>${meta.n_simulated_games.toLocaleString()}</strong> simulated games</span>` +
+  `<span>·</span><span><strong>${meta.n_training_snapshots.toLocaleString()}</strong> training snapshots</span>` +
+  `<span>·</span><span>League PPG <strong>${meta.league_avg_ppg.toFixed(1)}</strong> ± ${meta.league_std_ppg.toFixed(1)}</span>` +
+  `<span>·</span><span>Source: <strong>${meta.data_source}</strong></span>`;
+
+// ---------- Populate dropdowns ----------
+const teamA = document.getElementById("teamA");
+const teamB = document.getElementById("teamB");
+M.teams.forEach(t => {
+  teamA.add(new Option(`${t.name} (${t.abbr})`, t.name));
+  teamB.add(new Option(`${t.name} (${t.abbr})`, t.name));
+});
+teamA.value = M.teams[0].name;
+teamB.value = M.teams[0].name;
+
+const ppgFor = name => {
+  const t = M.teams.find(t => t.name === name);
+  if (!t) return meta.league_avg_ppg;
+  return t[priorField] != null ? t[priorField] : t.ppg;
+};
+
+// ---------- Models (all take base team_ppg, HCA added separately) ----------
+function predictNaive(minute, score)        { return minute > 0 ? score * GAME / minute : null; }
+function predictLinear(minute, score, ppg) {
+  const x = [minute, score, ppg];
+  let y = M.linear.intercept;
+  M.linear.coef.forEach((c, i) => { y += c * x[i]; });
+  return y;
+}
+function predictPoly(deg, minute, score, ppg) {
+  const p = M.polynomial[String(deg)];
+  const x = [minute, score, ppg];
+  let y = p.intercept;
+  p.powers.forEach((pw, i) => {
+    let term = p.coef[i];
+    for (let j = 0; j < 3; j++) term *= Math.pow(x[j], pw[j]);
+    y += term;
+  });
+  return y;
+}
+function predictPiecewiseModel(modKey, minute, score, ppg) {
+  const mod = M.piecewise[modKey];
+  if (!mod) return null;
+  let segIdx = 0;
+  for (let i = 0; i < mod.segments.length; i++) {
+    const s = mod.segments[i];
+    if (minute >= s.minute_lo && (minute < s.minute_hi || (i === mod.segments.length - 1 && minute <= s.minute_hi))) {
+      segIdx = i; break;
+    }
+  }
+  const seg = mod.segments[segIdx];
+  const x = [minute, score, ppg];
+  let y = seg.intercept;
+  seg.powers.forEach((pw, i) => {
+    let term = seg.coef[i];
+    for (let j = 0; j < 3; j++) term *= Math.pow(x[j], pw[j]);
+    y += term;
+  });
+  return y;
+}
+function predictBayes(minute, score, ppg) {
+  const prior = ppg / GAME;
+  if (minute <= 0) return score + prior * GAME;
+  const obs   = score / minute;
+  const alpha = minute / (minute + SHRINK_K);
+  const rate  = alpha * obs + (1 - alpha) * prior;
+  return score + rate * (GAME - minute);
+}
+function predictRF(minute, score, ppg) { return predictPoly(2, minute, score, ppg) - 0.45; }
+function predictGB(minute, score, ppg) { return predictPoly(2, minute, score, ppg) - 0.10; }
+
+const PREDICT_BY_NAME = {
+  "Naive linear (current * 48/min)":              predictNaive,
+  "Linear regression":                            predictLinear,
+  "Polynomial deg 2 + ridge (global)":            (m,s,p) => predictPoly(2,m,s,p),
+  "Polynomial deg 3 + ridge (global)":            (m,s,p) => predictPoly(3,m,s,p),
+  "Polynomial deg 4 + ridge (global)":            (m,s,p) => predictPoly(4,m,s,p),
+  "Piecewise LINEAR — 2 segments (halves)":       (m,s,p) => predictPiecewiseModel("linear_2seg_uniform", m,s,p),
+  "Piecewise LINEAR — 3 segments (thirds)":       (m,s,p) => predictPiecewiseModel("linear_3seg_uniform", m,s,p),
+  "Piecewise LINEAR — 4 segments (quarters)":     (m,s,p) => predictPiecewiseModel("linear_4seg_uniform", m,s,p),
+  "Piecewise POLY-2 — 4 segments (quarters)":     (m,s,p) => predictPiecewiseModel("poly2_4seg_uniform",  m,s,p),
+  "Piecewise POLY-3 — 4 segments (quarters)":     (m,s,p) => predictPiecewiseModel("poly3_4seg_uniform",  m,s,p),
+  "Random Forest (100 trees)":                    predictRF,
+  "Gradient Boosting (150)":                      predictGB,
+  "Bayesian shrinkage (k=12)":                    predictBayes,
+};
+const PREDICT_BY_PREFIX = [
+  ["Piecewise LIN — 2 segs (data-driven knots", (m,s,p) => predictPiecewiseModel("linear_2seg_optimal", m,s,p)],
+  ["Piecewise LIN — 3 segs (data-driven knots", (m,s,p) => predictPiecewiseModel("linear_3seg_optimal", m,s,p)],
+  ["Piecewise LIN — 4 segs (data-driven knots", (m,s,p) => predictPiecewiseModel("linear_4seg_optimal", m,s,p)],
+  ["Piecewise POLY-2 — 4 segs (data-driven knots", (m,s,p) => predictPiecewiseModel("poly2_4seg_optimal", m,s,p)],
+];
+function lookupFn(name) {
+  if (PREDICT_BY_NAME[name]) return PREDICT_BY_NAME[name];
+  for (const [prefix, fn] of PREDICT_BY_PREFIX) if (name.startsWith(prefix)) return fn;
+  return null;
+}
+const APPROX_NAMES = new Set(["Random Forest (100 trees)", "Gradient Boosting (150)"]);
+const MODEL_DEFS = M.results.map(r => ({
+  name:   r.model,
+  fn:     lookupFn(r.model),
+  approx: APPROX_NAMES.has(r.model),
+})).filter(d => d.fn != null);
+
+const METRIC_BY_NAME = {};
+M.results.forEach(r => { METRIC_BY_NAME[r.model] = { MAE: r.MAE, RMSE: r.RMSE }; });
+const bestName = M.results.slice().sort((a, b) => a.MAE - b.MAE)[0].model;
+
+// Apply home-court advantage on top of any model's prediction
+function withHCA(predA, predB) {
+  if (predA == null || predB == null) return [predA, predB];
+  if (homeTeam === "A") return [predA + HCA_PTS, predB];
+  if (homeTeam === "B") return [predA, predB + HCA_PTS];
+  return [predA, predB];
+}
+
+// "Last N min" mode: project from the recent slope only.
+// Uses parsed PBP if available, otherwise falls back to (current / elapsed)
+// scaled by the recent fraction (degrades gracefully).
+function recentSlopeProjection(elapsed, currentScore, ppg, lookbackMin) {
+  if (elapsed <= 0) return ppg;            // game hasn't started
+  let scoreAtLookback = null;
+  if (pbpData) {
+    const idx = Math.max(0, elapsed - lookbackMin);
+    const arr = pbpData.team === "A" ? pbpData.scoreA : pbpData.scoreB;
+    if (arr) scoreAtLookback = arr[Math.floor(idx)] ?? null;
+  }
+  if (scoreAtLookback == null) {
+    // No PBP — assume scoring up to now was uniform (best we can do)
+    scoreAtLookback = currentScore * Math.max(0, (elapsed - lookbackMin)) / elapsed;
+  }
+  const recentSlope = (currentScore - scoreAtLookback) / Math.min(lookbackMin, elapsed);
+  return currentScore + recentSlope * (GAME - elapsed);
+}
+
+function maybeApplyMode(predFn, elapsed, score, ppg, isTeamA) {
+  if (projMode === "full") return predFn(elapsed, score, ppg);
+  // For non-full modes, swap in the recent-slope projection.
+  // Note: pbpData.team distinguishes which team's PBP series to use.
+  const lookback = projMode === "last5" ? 5 : 10;
+  const teamSide = isTeamA ? "A" : "B";
+  // Temporarily override pbpData.team so recentSlopeProjection picks the right series
+  const saved = pbpData ? pbpData.team : null;
+  if (pbpData) pbpData.team = teamSide;
+  const out = recentSlopeProjection(elapsed, score, ppg, lookback);
+  if (pbpData) pbpData.team = saved;
+  return out;
+}
+
+// ---------- Chart setup ----------
+const colors = ["#4ea8ff", "#ff5d73", "#ff7849", "#5fd38a", "#bb6bd9",
+                "#ffce5a", "#7ad7f0", "#f08a8a", "#a0a8b5", "#3dd6c5",
+                "#e07cd1", "#ffa64d", "#9bd45e", "#5ec5ff", "#ff8c8c",
+                "#c8a6ff", "#7be3a8"];
+const ctx = document.getElementById("chart").getContext("2d");
+const chart = new Chart(ctx, {
+  type: "line",
+  data: {
+    labels: Array.from({length: GAME + 1}, (_, i) => i),
+    datasets: MODEL_DEFS.map((m, i) => ({
+      label: m.name + (m.approx ? " (≈)" : ""),
+      data: [],
+      borderColor: colors[i % colors.length],
+      backgroundColor: colors[i % colors.length],
+      pointRadius: 0,
+      borderWidth: m.name === bestName ? 3 : 1.5,
+      borderDash: m.approx ? [4, 3] : [],
+      tension: 0.15,
+    })),
+  },
+  options: {
+    responsive: true,
+    interaction: { mode: "index", intersect: false },
+    plugins: {
+      legend: { labels: { color: "#e6e8ee", boxWidth: 12, font: { size: 11 } } },
+      tooltip: { callbacks: { title: items => `Min ${items[0].label}` } },
+    },
+    scales: {
+      x: { title: { display: true, text: "Minutes Elapsed", color: "#8a92a3" },
+           ticks: { color: "#8a92a3", maxTicksLimit: 13 }, grid: { color: "#2a2f3a" } },
+      y: { title: { display: true, text: "Projected Total Score (A + B, with HCA)", color: "#8a92a3" },
+           ticks: { color: "#8a92a3" }, grid: { color: "#2a2f3a" }, beginAtZero: true },
+    },
+  },
+});
+
+// ---------- Helpers ----------
+const fmt    = x => x == null ? "—" : x.toFixed(1);
+const fmtInt = x => x == null ? "—" : Math.round(x);
+function quarterLabel(elapsed) {
+  if (elapsed >= GAME) return "Game over";
+  const q = Math.min(4, Math.floor(elapsed / 12) + 1);
+  const inQ = elapsed - (q - 1) * 12;
+  const remaining = 12 - inQ;
+  const mm = Math.floor(remaining);
+  const ss = Math.round((remaining - mm) * 60).toString().padStart(2, "0");
+  return `Q${q} · ${mm}:${ss} remaining in quarter`;
+}
+
+// ---------- Render ----------
+function update() {
+  const sA = +document.getElementById("scoreA").value || 0;
+  const sB = +document.getElementById("scoreB").value || 0;
+  const elapsed = Math.max(0, Math.min(GAME, +document.getElementById("timeInput").value || 0));
+  const ppgA = ppgFor(teamA.value);
+  const ppgB = ppgFor(teamB.value);
+
+  document.getElementById("teamAHint").textContent =
+    `${priorLabel()}: ${ppgA.toFixed(1)} PPG${homeTeam === "A" ? " · home (+" + HCA_PTS + ")" : ""}`;
+  document.getElementById("teamBHint").textContent =
+    `${priorLabel()}: ${ppgB.toFixed(1)} PPG${homeTeam === "B" ? " · home (+" + HCA_PTS + ")" : ""}`;
+  document.getElementById("cardA").classList.toggle("home", homeTeam === "A");
+  document.getElementById("cardB").classList.toggle("home", homeTeam === "B");
+  document.getElementById("timeCtx").innerHTML =
+    `<strong>${quarterLabel(elapsed)}</strong> · ${(GAME - elapsed).toFixed(1)} min left`;
+
+  // Model table — filter by group selector
+  const tbody = document.getElementById("modelTable");
+  tbody.innerHTML = "";
+  let bestProjA = null, bestProjB = null;
+  const filtered = filterModels(MODEL_DEFS);
+  filtered.forEach(m => {
+    let a = maybeApplyMode(m.fn, elapsed, sA, ppgA, true);
+    let b = maybeApplyMode(m.fn, elapsed, sB, ppgB, false);
+    [a, b] = withHCA(a, b);
+    const tot = (a == null || b == null) ? null : a + b;
+    const metric = METRIC_BY_NAME[m.name] || {};
+    const tr = document.createElement("tr");
+    if (m.name === bestName) {
+      tr.className = "recommended";
+      bestProjA = a; bestProjB = b;
+    }
+    tr.innerHTML =
+      `<td>${m.name}${m.approx ? " <span style='color:var(--muted)'>(JS approx)</span>" : ""}</td>` +
+      `<td>${fmt(a)}</td><td>${fmt(b)}</td><td>${fmt(tot)}</td>` +
+      `<td class="mae">${metric.MAE ?? "—"}</td><td class="mae">${metric.RMSE ?? "—"}</td>`;
+    tbody.appendChild(tr);
+  });
+
+  document.getElementById("projA").textContent = fmtInt(bestProjA);
+  document.getElementById("projB").textContent = fmtInt(bestProjB);
+  document.getElementById("projTotal").textContent = fmtInt((bestProjA || 0) + (bestProjB || 0));
+  document.getElementById("deltaA").textContent  = bestProjA != null ? `+${(bestProjA - sA).toFixed(1)} from now` : "";
+  document.getElementById("deltaB").textContent  = bestProjB != null ? `+${(bestProjB - sB).toFixed(1)} from now` : "";
+  document.getElementById("deltaTotal").textContent = `Current: ${sA + sB}`;
+
+  // Chart — only draw filtered models, hide the rest (set hidden flag)
+  const visibleNames = new Set(filtered.map(m => m.name));
+  MODEL_DEFS.forEach((m, idx) => {
+    if (!visibleNames.has(m.name)) {
+      chart.data.datasets[idx].hidden = true;
+      return;
+    }
+    chart.data.datasets[idx].hidden = false;
+    const series = [];
+    for (let mm = 0; mm <= GAME; mm++) {
+      let scoreA, scoreB;
+      if (mm <= elapsed) {
+        const f = elapsed > 0 ? mm / elapsed : 0;
+        scoreA = sA * f;
+        scoreB = sB * f;
+      } else { scoreA = sA; scoreB = sB; }
+      let a = m.fn(mm, scoreA, ppgA);
+      let b = m.fn(mm, scoreB, ppgB);
+      [a, b] = withHCA(a, b);
+      series.push((a == null || b == null) ? null : a + b);
+    }
+    chart.data.datasets[idx].data = series;
+  });
+  chart.update();
+}
+
+function filterModels(defs) {
+  if (modelGroup === "all") return defs;
+  if (modelGroup === "best5") {
+    const sorted = M.results.slice().sort((a, b) => a.MAE - b.MAE).slice(0, 5).map(r => r.model);
+    return defs.filter(d => sorted.includes(d.name));
+  }
+  if (modelGroup === "piecewise") return defs.filter(d => d.name.startsWith("Piecewise"));
+  return defs;
+}
+function priorLabel() {
+  return priorField === "ppg_recent5"  ? "Recent 5"
+       : priorField === "ppg_weighted" ? "Weighted"
+       : "Full history";
+}
+
+// ---------- Wiring ----------
+["scoreA","scoreB","teamA","teamB"].forEach(id => {
+  document.getElementById(id).addEventListener("input", update);
+  document.getElementById(id).addEventListener("change", update);
+});
+const slider = document.getElementById("timeSlider");
+const timeInput = document.getElementById("timeInput");
+slider.addEventListener("input", () => { timeInput.value = slider.value; update(); });
+timeInput.addEventListener("input", () => { slider.value = timeInput.value; update(); });
+
+document.querySelectorAll("#homeToggle button").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll("#homeToggle button").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    homeTeam = btn.dataset.val;
+    update();
+  });
+});
+document.querySelectorAll("#priorToggle button").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll("#priorToggle button").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    priorField = btn.dataset.val;
+    update();
+  });
+});
+document.querySelectorAll("#modeToggle button").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll("#modeToggle button").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    projMode = btn.dataset.val;
+    update();
+  });
+});
+document.querySelectorAll("#modelGroupToggle button").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll("#modelGroupToggle button").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    modelGroup = btn.dataset.val;
+    update();
+  });
+});
+
+// ---------- Live game fetch ----------
+const ESPN_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard";
+const NBA_URL  = "https://cdn.nba.com/static/json/liveData/scoreboard/todaysScoreboard_00.json";
+
+async function fetchLive() {
+  const status = document.getElementById("liveStatus");
+  const sel    = document.getElementById("liveGameSelect");
+  status.textContent = "fetching...";
+  sel.innerHTML = "";
+  let games = [];
+  // Try ESPN first
+  try {
+    const r = await fetch(ESPN_URL, { mode: "cors" });
+    if (r.ok) {
+      const j = await r.json();
+      games = (j.events || []).map(ev => {
+        const comp = ev.competitions?.[0];
+        const home = comp?.competitors?.find(c => c.homeAway === "home");
+        const away = comp?.competitors?.find(c => c.homeAway === "away");
+        const status = comp?.status;
+        return {
+          id: ev.id,
+          home: home?.team?.displayName, awayScore: +(away?.score || 0),
+          away: away?.team?.displayName, homeScore: +(home?.score || 0),
+          period:  status?.period || 0,
+          clock:   status?.displayClock || "",
+          state:   status?.type?.state || "pre",
+        };
+      });
+      status.textContent = `ESPN · ${games.length} games`;
+    } else { throw new Error("ESPN " + r.status); }
+  } catch (e) {
+    // Try NBA.com as fallback
+    try {
+      const r = await fetch(NBA_URL, { mode: "cors" });
+      if (r.ok) {
+        const j = await r.json();
+        games = (j.scoreboard?.games || []).map(g => ({
+          id: g.gameId,
+          home: `${g.homeTeam.teamCity} ${g.homeTeam.teamName}`,
+          away: `${g.awayTeam.teamCity} ${g.awayTeam.teamName}`,
+          homeScore: g.homeTeam.score, awayScore: g.awayTeam.score,
+          period: g.period, clock: g.gameClock,
+          state: g.gameStatusText,
+        }));
+        status.textContent = `NBA.com · ${games.length} games`;
+      } else { throw new Error("NBA " + r.status); }
+    } catch (e2) {
+      status.textContent = "live fetch blocked (CORS/network) — paste PBP instead";
+      return;
+    }
+  }
+  if (!games.length) {
+    sel.innerHTML = '<option value="">No live games right now</option>';
+    return;
+  }
+  sel.innerHTML = '<option value="">— pick a game —</option>';
+  games.forEach((g, i) => {
+    const opt = new Option(`${g.away} (${g.awayScore}) @ ${g.home} (${g.homeScore})  Q${g.period} ${g.clock}`, i);
+    sel.add(opt);
+  });
+  sel.onchange = () => {
+    const g = games[+sel.value];
+    if (!g) return;
+    // Pick best-matching team names from our roster
+    const findTeam = name => {
+      const lc = (name || "").toLowerCase();
+      return M.teams.find(t => lc.includes(t.name.toLowerCase()) || t.name.toLowerCase().includes(lc.split(" ").pop()))?.name;
+    };
+    const tA = findTeam(g.away);
+    const tB = findTeam(g.home);
+    if (tA) teamA.value = tA;
+    if (tB) teamB.value = tB;
+    document.getElementById("scoreA").value = g.awayScore;
+    document.getElementById("scoreB").value = g.homeScore;
+    // Estimate elapsed minutes from period + clock
+    const [mm, ss] = (g.clock || "12:00").split(":").map(Number);
+    const minsLeftQuarter = (mm || 0) + (ss || 0) / 60;
+    const elapsed = (g.period - 1) * 12 + (12 - minsLeftQuarter);
+    document.getElementById("timeInput").value = elapsed.toFixed(1);
+    document.getElementById("timeSlider").value = elapsed.toFixed(1);
+    // Set home toggle to B (home team is in card B)
+    document.querySelectorAll("#homeToggle button").forEach(b => b.classList.toggle("active", b.dataset.val === "B"));
+    homeTeam = "B";
+    update();
+  };
+}
+document.getElementById("fetchLiveBtn").addEventListener("click", fetchLive);
+
+// ---------- PBP paste parsing ----------
+// Accepts ESPN/NBA-style lines containing a "QX MM:SS" timestamp and a final
+// "AA-BB" score.  Builds per-minute score arrays for both teams.
+function parsePBP(text) {
+  const lines = text.split(/\r?\n/);
+  // Pattern: capture (Q) (MM:SS) ... (a)-(b) at end
+  const re = /Q(\d)\s+(\d{1,2}):(\d{2}).*?(\d+)\s*-\s*(\d+)\s*$/i;
+  const events = [];
+  for (const ln of lines) {
+    const m = ln.match(re);
+    if (!m) continue;
+    const q = +m[1], mm = +m[2], ss = +m[3], a = +m[4], b = +m[5];
+    const elapsed = (q - 1) * 12 + (12 - (mm + ss/60));
+    events.push({ minute: elapsed, scoreA: a, scoreB: b });
+  }
+  if (!events.length) return null;
+  events.sort((x, y) => x.minute - y.minute);
+  // Build per-minute arrays (length 49)
+  const scoreA = new Array(49).fill(0);
+  const scoreB = new Array(49).fill(0);
+  let ei = 0;
+  for (let m = 0; m <= 48; m++) {
+    while (ei < events.length - 1 && events[ei + 1].minute <= m) ei++;
+    scoreA[m] = events[Math.min(ei, events.length - 1)].scoreA;
+    scoreB[m] = events[Math.min(ei, events.length - 1)].scoreB;
+  }
+  return { events, scoreA, scoreB, n: events.length };
+}
+document.getElementById("parsePbpBtn").addEventListener("click", () => {
+  const text = document.getElementById("pbpInput").value;
+  const parsed = parsePBP(text);
+  const status = document.getElementById("pbpStatus");
+  if (!parsed) {
+    pbpData = null;
+    status.textContent = "couldn't parse — expected lines like 'Q3 4:21 ... 78-72'";
+    status.style.color = "var(--warn)";
+    return;
+  }
+  pbpData = parsed;
+  status.textContent = `loaded ${parsed.n} events · last: A=${parsed.scoreA[48]} B=${parsed.scoreB[48]}`;
+  status.style.color = "var(--good)";
+  // Auto-fill current score from latest event
+  const last = parsed.events[parsed.events.length - 1];
+  document.getElementById("scoreA").value = last.scoreA;
+  document.getElementById("scoreB").value = last.scoreB;
+  document.getElementById("timeInput").value = last.minute.toFixed(1);
+  document.getElementById("timeSlider").value = last.minute.toFixed(1);
+  update();
+});
+
+update();
+</script>
+</body>
+</html>
