@@ -1,19 +1,21 @@
 model,MAE,RMSE
-Naive linear (current * 48/min),12.49,21.657
-Linear regression,6.161,8.154
-Polynomial deg 2 + ridge (global),6.01,8.024
-Polynomial deg 3 + ridge (global),6.036,8.044
-Polynomial deg 4 + ridge (global),6.035,8.043
-Piecewise LINEAR — 2 segments (halves),6.051,8.057
-Piecewise LINEAR — 3 segments (thirds),6.028,8.042
-Piecewise LINEAR — 4 segments (quarters),6.021,8.034
-Piecewise POLY-2 — 4 segments (quarters),6.0,8.014
-Piecewise POLY-3 — 4 segments (quarters),6.0,8.014
-Piecewise LIN — 2 segs (data-driven knots [24.0]),6.051,8.057
-"Piecewise LIN — 3 segs (data-driven knots [20.0, 40.0])",6.022,8.042
-"Piecewise LIN — 4 segs (data-driven knots [12.0, 32.0, 44.0])",6.025,8.043
-"Piecewise POLY-2 — 4 segs (data-driven knots [8.0, 12.0, 36.0])",6.001,8.014
-Random Forest (100 trees),6.77,8.974
-Gradient Boosting (150),6.434,8.458
-Bayesian shrinkage (k=12),7.18,9.794
-Neural Net MLP (32-16 ReLU),6.277,8.224
+Naive linear (current * 48/min),12.542,21.941
+Linear regression,5.902,7.791
+Polynomial deg 2 + ridge (global),5.772,7.679
+Polynomial deg 3 + ridge (global),5.793,7.697
+Polynomial deg 4 + ridge (global),5.793,7.697
+Piecewise LINEAR — 2 segments (halves),5.811,7.713
+Piecewise LINEAR — 3 segments (thirds),5.791,7.696
+Piecewise LINEAR — 4 segments (quarters),5.783,7.688
+Piecewise POLY-2 — 4 segments (quarters),5.758,7.661
+Piecewise POLY-3 — 4 segments (quarters),5.758,7.661
+Piecewise LIN — 2 segs (data-driven knots [28.0]),5.805,7.714
+"Piecewise LIN — 3 segs (data-driven knots [16.0, 40.0])",5.794,7.7
+"Piecewise LIN — 4 segs (data-driven knots [16.0, 36.0, 44.0])",5.786,7.694
+"Piecewise POLY-2 — 4 segs (data-driven knots [12.0, 24.0, 40.0])",5.759,7.662
+Random Forest (100 trees),5.79,7.692
+Gradient Boosting (150),5.817,7.722
+Huber regression (robust),5.891,7.802
+Bayesian shrinkage (k=12),7.069,9.549
+Neural Net MLP (24-12 ReLU),5.79,7.685
+Stacking (poly2+rf+gb+huber),5.759,7.663

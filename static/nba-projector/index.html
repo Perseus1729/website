@@ -357,34 +357,35 @@ const ppgFor = name => {
 // working while ALSO supporting the NEW 9-feature models that come out
 // of the updated pipeline (re-run pipeline/build_models.py).
 
-function buildFeatureDict(team, opp, minute, currentScore, isHome, teamSide) {
+function buildFeatureDict(team, opp, minute, currentScore, isHome, teamSide, oppScore) {
   const r5  = team.ppg_recent5  ?? team.ppg;
   const ov  = team.ppg_overall  ?? team.ppg;
   const wt  = team.ppg_weighted ?? team.ppg;
   const oR5 = (opp && opp.ppg_recent5) ?? meta.league_avg_ppg;
 
-  // Per-team current-game slope (last 5 / 10 in-game minutes).
-  // Use real PBP if loaded, else assume scoring was uniform up to now.
+  // Recent slopes: from PBP if loaded, else uniform-rate estimate.
   let slope5 = 0, slope10 = 0;
   if (pbpData) {
     const arr = teamSide === "A" ? pbpData.scoreA : pbpData.scoreB;
     if (arr) {
-      const idx5  = Math.max(0, Math.floor(minute - 5));
-      const idx10 = Math.max(0, Math.floor(minute - 10));
-      slope5  = currentScore - (arr[idx5]  ?? 0);
-      slope10 = currentScore - (arr[idx10] ?? 0);
+      slope5  = currentScore - (arr[Math.max(0, Math.floor(minute - 5))]  ?? 0);
+      slope10 = currentScore - (arr[Math.max(0, Math.floor(minute - 10))] ?? 0);
     }
   } else if (minute > 0) {
     const rate = currentScore / minute;
     slope5  = rate * Math.min(5,  minute);
     slope10 = rate * Math.min(10, minute);
   }
+  const acceleration = (slope5 / 5) - (slope10 / 10);
+  const paceFactor   = (minute > 0 && wt > 0)
+    ? (currentScore / minute) / (wt / GAME)
+    : 1.0;
+  const oppCur = (oppScore != null) ? oppScore : Math.max(0, currentScore - 3);
+  const pdiff  = currentScore - oppCur;
 
-  // Selected history window populates the legacy `team_ppg` slot read
-  // by the old 3-feature models.  New models read all three explicitly.
   const legacyPpg = team[priorField] ?? team.ppg;
   return {
-    minute, current_score: currentScore,
+    minute, current_score: currentScore, opp_current_score: oppCur,
     team_ppg:           legacyPpg,
     team_ppg_recent5:   r5,
     team_ppg_overall:   ov,
@@ -393,6 +394,10 @@ function buildFeatureDict(team, opp, minute, currentScore, isHome, teamSide) {
     is_home:            isHome ? 1 : 0,
     recent_slope_5:     slope5,
     recent_slope_10:    slope10,
+    acceleration:       acceleration,
+    pace_factor:        paceFactor,
+    point_diff:         pdiff,
+    abs_point_diff:     Math.abs(pdiff),
   };
 }
 
@@ -466,14 +471,82 @@ function predictBayes(featDict) {
 function predictRF(featDict) { return predictPoly(2, featDict) - 0.45; }
 function predictGB(featDict) { return predictPoly(2, featDict) - 0.10; }
 
+// Huber regression — like M.linear but inputs are standardized first.
+function predictHuber(featDict) {
+  const H = M.huber;
+  if (!H || !H.coef) return null;
+  const order = H.feature_order || ["minute", "current_score", "team_ppg"];
+  let y = H.intercept;
+  for (let i = 0; i < order.length; i++) {
+    let v = featDict[order[i]] ?? 0;
+    if (H.scaler_mean && H.scaler_scale) {
+      const s = H.scaler_scale[i] || 1;
+      v = (v - H.scaler_mean[i]) / s;
+    }
+    y += H.coef[i] * v;
+  }
+  return y;
+}
+
+// XGBoost: walk every JSON tree and sum leaf values + base_score.
+function evalXGBTree(node, x) {
+  if (node == null) return 0;
+  if ("leaf" in node) return node.leaf;
+  const featIdx = parseInt(node.split.slice(1));   // "f0" -> 0
+  const v = x[featIdx];
+  // Default to "missing" branch on NaN, else split-condition compare
+  const childId = (v == null || isNaN(v))
+    ? node.missing
+    : (v < node.split_condition ? node.yes : node.no);
+  const child = (node.children || []).find(c => c.nodeid === childId);
+  return evalXGBTree(child, x);
+}
+function predictXGBoost(featDict) {
+  const X = M.xgboost;
+  if (!X || !X.trees || !X.trees.length) return null;
+  const order = X.feature_order;
+  const x = order.map(n => featDict[n] ?? 0);
+  let y = X.base_score || 0;
+  for (const t of X.trees) y += evalXGBTree(t, x);
+  return Number.isFinite(y) ? y : null;
+}
+
+// Stacking ensemble: weighted linear blend of named base models on test set.
+function predictStacking(featDict) {
+  const S = M.stacking;
+  if (!S || !S.members || !S.weights) return null;
+  const lookup = {
+    poly2: () => predictPoly(2, featDict),
+    rf:    () => predictRF(featDict),
+    gb:    () => predictGB(featDict),
+    huber: () => predictHuber(featDict),
+    xgb:   () => predictXGBoost(featDict),
+    nn:    () => predictNN(featDict),
+  };
+  let y = 0; let w = 0;
+  for (let i = 0; i < S.members.length; i++) {
+    const fn = lookup[S.members[i]];
+    if (!fn) continue;
+    const p = fn();
+    if (p == null || !Number.isFinite(p)) continue;
+    y += S.weights[i] * p;
+    w += S.weights[i];
+  }
+  return w > 0 ? y / w : null;
+}
+
 // Neural net forward pass; uses M.neural.feature_order (or 3-feature default).
+// Inputs are standardized (mean/scale) and the output is de-standardized
+// (y_mean + y_std * out) when the pipeline emitted those fields.  Returns
+// null on any non-finite intermediate so the table just hides the row.
 function predictNN(featDict) {
   const N = M.neural;
   if (!N || !N.layers) return null;
   const order = N.feature_order || ["minute", "current_score", "team_ppg"];
   let x = order.map((name, i) => {
     const v = featDict[name] ?? 0;
-    return (v - N.scaler_mean[i]) / N.scaler_scale[i];
+    const scale = N.scaler_scale[i] || 1;
+    return (v - N.scaler_mean[i]) / scale;
   });
   for (const layer of N.layers) {
     const out = new Array(layer.b.length).fill(0);
@@ -484,7 +557,11 @@ function predictNN(featDict) {
     }
     x = out;
   }
-  return x[0];
+  let y = x[0];
+  if (typeof N.y_std === "number" && typeof N.y_mean === "number") {
+    y = y * N.y_std + N.y_mean;
+  }
+  return Number.isFinite(y) ? y : null;
 }
 
 // Every entry is (featDict) -> projected final score.  Each predict
@@ -506,12 +583,16 @@ const PREDICT_BY_NAME = {
   "Bayesian shrinkage (k=12)":                    predictBayes,
   "Neural Net MLP (16-8 ReLU)":                   predictNN,
   "Neural Net MLP (32-16 ReLU)":                  predictNN,
+  "Neural Net MLP (24-12 ReLU)":                  predictNN,
+  "Huber regression (robust)":                    predictHuber,
+  "XGBoost (200 trees, depth 5)":                 predictXGBoost,
 };
 const PREDICT_BY_PREFIX = [
   ["Piecewise LIN — 2 segs (data-driven knots",    (f) => predictPiecewiseModel("linear_2seg_optimal", f)],
   ["Piecewise LIN — 3 segs (data-driven knots",    (f) => predictPiecewiseModel("linear_3seg_optimal", f)],
   ["Piecewise LIN — 4 segs (data-driven knots",    (f) => predictPiecewiseModel("linear_4seg_optimal", f)],
   ["Piecewise POLY-2 — 4 segs (data-driven knots", (f) => predictPiecewiseModel("poly2_4seg_optimal",  f)],
+  ["Stacking (",                                   predictStacking],
 ];
 function lookupFn(name) {
   if (PREDICT_BY_NAME[name]) return PREDICT_BY_NAME[name];
@@ -640,10 +721,12 @@ function update() {
     `<strong>${quarterLabel(elapsed)}</strong> · ${(GAME - elapsed).toFixed(1)} min left`;
 
   // Build per-team feature dicts ONCE per render — every model reads from these.
+  // Each side gets the opponent's current score so point_diff / abs_point_diff
+  // / pace_factor are populated correctly.
   const tA = M.teams.find(t => t.name === teamA.value);
   const tB = M.teams.find(t => t.name === teamB.value);
-  const featA = buildFeatureDict(tA, tB, elapsed, sA, homeTeam === "A", "A");
-  const featB = buildFeatureDict(tB, tA, elapsed, sB, homeTeam === "B", "B");
+  const featA = buildFeatureDict(tA, tB, elapsed, sA, homeTeam === "A", "A", sB);
+  const featB = buildFeatureDict(tB, tA, elapsed, sB, homeTeam === "B", "B", sA);
 
   // Model table — filter by group selector
   const tbody = document.getElementById("modelTable");
@@ -691,8 +774,8 @@ function update() {
         scoreAtMA = sA * f;
         scoreAtMB = sB * f;
       } else { scoreAtMA = sA; scoreAtMB = sB; }
-      const fA = buildFeatureDict(tA, tB, mm, scoreAtMA, homeTeam === "A", "A");
-      const fB = buildFeatureDict(tB, tA, mm, scoreAtMB, homeTeam === "B", "B");
+      const fA = buildFeatureDict(tA, tB, mm, scoreAtMA, homeTeam === "A", "A", scoreAtMB);
+      const fB = buildFeatureDict(tB, tA, mm, scoreAtMB, homeTeam === "B", "B", scoreAtMA);
       let a = m.fn(fA);
       let b = m.fn(fB);
       [a, b] = withHCA(a, b);
