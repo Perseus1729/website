@@ -349,76 +349,169 @@ const ppgFor = name => {
   return t[priorField] != null ? t[priorField] : t.ppg;
 };
 
-// ---------- Models (all take base team_ppg, HCA added separately) ----------
-function predictNaive(minute, score)        { return minute > 0 ? score * GAME / minute : null; }
-function predictLinear(minute, score, ppg) {
-  const x = [minute, score, ppg];
-  let y = M.linear.intercept;
-  M.linear.coef.forEach((c, i) => { y += c * x[i]; });
+// ---------- Feature-dict-driven model inference --------------------------
+// Each model declares its own feature_order in models.js.  We build one
+// dictionary holding every feature the page knows about (history priors,
+// opponent prior, home flag, recent slopes) and let each model pick the
+// names it was trained on.  This keeps the OLD 3-feature models.js
+// working while ALSO supporting the NEW 9-feature models that come out
+// of the updated pipeline (re-run pipeline/build_models.py).
+
+function buildFeatureDict(team, opp, minute, currentScore, isHome, teamSide) {
+  const r5  = team.ppg_recent5  ?? team.ppg;
+  const ov  = team.ppg_overall  ?? team.ppg;
+  const wt  = team.ppg_weighted ?? team.ppg;
+  const oR5 = (opp && opp.ppg_recent5) ?? meta.league_avg_ppg;
+
+  // Per-team current-game slope (last 5 / 10 in-game minutes).
+  // Use real PBP if loaded, else assume scoring was uniform up to now.
+  let slope5 = 0, slope10 = 0;
+  if (pbpData) {
+    const arr = teamSide === "A" ? pbpData.scoreA : pbpData.scoreB;
+    if (arr) {
+      const idx5  = Math.max(0, Math.floor(minute - 5));
+      const idx10 = Math.max(0, Math.floor(minute - 10));
+      slope5  = currentScore - (arr[idx5]  ?? 0);
+      slope10 = currentScore - (arr[idx10] ?? 0);
+    }
+  } else if (minute > 0) {
+    const rate = currentScore / minute;
+    slope5  = rate * Math.min(5,  minute);
+    slope10 = rate * Math.min(10, minute);
+  }
+
+  // Selected history window populates the legacy `team_ppg` slot read
+  // by the old 3-feature models.  New models read all three explicitly.
+  const legacyPpg = team[priorField] ?? team.ppg;
+  return {
+    minute, current_score: currentScore,
+    team_ppg:           legacyPpg,
+    team_ppg_recent5:   r5,
+    team_ppg_overall:   ov,
+    team_ppg_weighted:  wt,
+    opp_ppg_recent5:    oR5,
+    is_home:            isHome ? 1 : 0,
+    recent_slope_5:     slope5,
+    recent_slope_10:    slope10,
+  };
+}
+
+// True if the current-generation models include is_home as a feature.
+// When false we apply +HCA to the home team post-hoc (old models).
+function modelsKnowHome() {
+  const fo = M.metadata && M.metadata.feature_order;
+  return Array.isArray(fo) && fo.includes("is_home");
+}
+
+// Generic linear / polynomial / core_poly evaluator driven by feature_order.
+function evalModel(model, featDict) {
+  if (!model) return null;
+  if (model.kind === "core_poly") {
+    const core = model.core_features.map(n => featDict[n] ?? 0);
+    const rest = model.rest_features.map(n => featDict[n] ?? 0);
+    const xPoly = model.core_powers.map(pw => {
+      let t = 1;
+      for (let j = 0; j < pw.length; j++) t *= Math.pow(core[j], pw[j]);
+      return t;
+    });
+    const xFull = xPoly.concat(rest);
+    let y = model.intercept;
+    for (let i = 0; i < model.coef.length; i++) y += model.coef[i] * xFull[i];
+    return y;
+  }
+  const order = model.feature_order || ["minute", "current_score", "team_ppg"];
+  const x = order.map(n => featDict[n] ?? 0);
+  let y = model.intercept;
+  if (model.powers) {                                     // polynomial
+    model.powers.forEach((pw, i) => {
+      let term = model.coef[i];
+      for (let j = 0; j < pw.length; j++) term *= Math.pow(x[j], pw[j]);
+      y += term;
+    });
+  } else {                                                // pure linear
+    model.coef.forEach((c, i) => { y += c * x[i]; });
+  }
   return y;
 }
-function predictPoly(deg, minute, score, ppg) {
-  const p = M.polynomial[String(deg)];
-  const x = [minute, score, ppg];
-  let y = p.intercept;
-  p.powers.forEach((pw, i) => {
-    let term = p.coef[i];
-    for (let j = 0; j < 3; j++) term *= Math.pow(x[j], pw[j]);
-    y += term;
-  });
-  return y;
+
+function predictNaive(featDict) {
+  return featDict.minute > 0 ? featDict.current_score * GAME / featDict.minute : null;
 }
-function predictPiecewiseModel(modKey, minute, score, ppg) {
+function predictLinear(featDict) { return evalModel(M.linear, featDict); }
+function predictPoly(deg, featDict) { return evalModel(M.polynomial[String(deg)], featDict); }
+function predictPiecewiseModel(modKey, featDict) {
   const mod = M.piecewise[modKey];
   if (!mod) return null;
+  const minute = featDict.minute;
   let segIdx = 0;
   for (let i = 0; i < mod.segments.length; i++) {
     const s = mod.segments[i];
+    if (s == null) continue;
     if (minute >= s.minute_lo && (minute < s.minute_hi || (i === mod.segments.length - 1 && minute <= s.minute_hi))) {
       segIdx = i; break;
     }
   }
-  const seg = mod.segments[segIdx];
-  const x = [minute, score, ppg];
-  let y = seg.intercept;
-  seg.powers.forEach((pw, i) => {
-    let term = seg.coef[i];
-    for (let j = 0; j < 3; j++) term *= Math.pow(x[j], pw[j]);
-    y += term;
-  });
-  return y;
+  return evalModel(mod.segments[segIdx], featDict);
 }
-function predictBayes(minute, score, ppg) {
+function predictBayes(featDict) {
+  const ppg = featDict.team_ppg_weighted ?? featDict.team_ppg ?? meta.league_avg_ppg;
+  const m   = featDict.minute, s = featDict.current_score;
   const prior = ppg / GAME;
-  if (minute <= 0) return score + prior * GAME;
-  const obs   = score / minute;
-  const alpha = minute / (minute + SHRINK_K);
+  if (m <= 0) return s + prior * GAME;
+  const obs   = s / m;
+  const alpha = m / (m + SHRINK_K);
   const rate  = alpha * obs + (1 - alpha) * prior;
-  return score + rate * (GAME - minute);
+  return s + rate * (GAME - m);
 }
-function predictRF(minute, score, ppg) { return predictPoly(2, minute, score, ppg) - 0.45; }
-function predictGB(minute, score, ppg) { return predictPoly(2, minute, score, ppg) - 0.10; }
+function predictRF(featDict) { return predictPoly(2, featDict) - 0.45; }
+function predictGB(featDict) { return predictPoly(2, featDict) - 0.10; }
 
+// Neural net forward pass; uses M.neural.feature_order (or 3-feature default).
+function predictNN(featDict) {
+  const N = M.neural;
+  if (!N || !N.layers) return null;
+  const order = N.feature_order || ["minute", "current_score", "team_ppg"];
+  let x = order.map((name, i) => {
+    const v = featDict[name] ?? 0;
+    return (v - N.scaler_mean[i]) / N.scaler_scale[i];
+  });
+  for (const layer of N.layers) {
+    const out = new Array(layer.b.length).fill(0);
+    for (let j = 0; j < layer.b.length; j++) {
+      let s = layer.b[j];
+      for (let i = 0; i < x.length; i++) s += x[i] * layer.W[i][j];
+      out[j] = layer.activation === "relu" ? Math.max(0, s) : s;
+    }
+    x = out;
+  }
+  return x[0];
+}
+
+// Every entry is (featDict) -> projected final score.  Each predict
+// function reads only the features named in its model's feature_order,
+// so adding a new feature in the pipeline doesn't require JS changes.
 const PREDICT_BY_NAME = {
   "Naive linear (current * 48/min)":              predictNaive,
   "Linear regression":                            predictLinear,
-  "Polynomial deg 2 + ridge (global)":            (m,s,p) => predictPoly(2,m,s,p),
-  "Polynomial deg 3 + ridge (global)":            (m,s,p) => predictPoly(3,m,s,p),
-  "Polynomial deg 4 + ridge (global)":            (m,s,p) => predictPoly(4,m,s,p),
-  "Piecewise LINEAR — 2 segments (halves)":       (m,s,p) => predictPiecewiseModel("linear_2seg_uniform", m,s,p),
-  "Piecewise LINEAR — 3 segments (thirds)":       (m,s,p) => predictPiecewiseModel("linear_3seg_uniform", m,s,p),
-  "Piecewise LINEAR — 4 segments (quarters)":     (m,s,p) => predictPiecewiseModel("linear_4seg_uniform", m,s,p),
-  "Piecewise POLY-2 — 4 segments (quarters)":     (m,s,p) => predictPiecewiseModel("poly2_4seg_uniform",  m,s,p),
-  "Piecewise POLY-3 — 4 segments (quarters)":     (m,s,p) => predictPiecewiseModel("poly3_4seg_uniform",  m,s,p),
+  "Polynomial deg 2 + ridge (global)":            (f) => predictPoly(2, f),
+  "Polynomial deg 3 + ridge (global)":            (f) => predictPoly(3, f),
+  "Polynomial deg 4 + ridge (global)":            (f) => predictPoly(4, f),
+  "Piecewise LINEAR — 2 segments (halves)":       (f) => predictPiecewiseModel("linear_2seg_uniform", f),
+  "Piecewise LINEAR — 3 segments (thirds)":       (f) => predictPiecewiseModel("linear_3seg_uniform", f),
+  "Piecewise LINEAR — 4 segments (quarters)":     (f) => predictPiecewiseModel("linear_4seg_uniform", f),
+  "Piecewise POLY-2 — 4 segments (quarters)":     (f) => predictPiecewiseModel("poly2_4seg_uniform",  f),
+  "Piecewise POLY-3 — 4 segments (quarters)":     (f) => predictPiecewiseModel("poly3_4seg_uniform",  f),
   "Random Forest (100 trees)":                    predictRF,
   "Gradient Boosting (150)":                      predictGB,
   "Bayesian shrinkage (k=12)":                    predictBayes,
+  "Neural Net MLP (16-8 ReLU)":                   predictNN,
+  "Neural Net MLP (32-16 ReLU)":                  predictNN,
 };
 const PREDICT_BY_PREFIX = [
-  ["Piecewise LIN — 2 segs (data-driven knots", (m,s,p) => predictPiecewiseModel("linear_2seg_optimal", m,s,p)],
-  ["Piecewise LIN — 3 segs (data-driven knots", (m,s,p) => predictPiecewiseModel("linear_3seg_optimal", m,s,p)],
-  ["Piecewise LIN — 4 segs (data-driven knots", (m,s,p) => predictPiecewiseModel("linear_4seg_optimal", m,s,p)],
-  ["Piecewise POLY-2 — 4 segs (data-driven knots", (m,s,p) => predictPiecewiseModel("poly2_4seg_optimal", m,s,p)],
+  ["Piecewise LIN — 2 segs (data-driven knots",    (f) => predictPiecewiseModel("linear_2seg_optimal", f)],
+  ["Piecewise LIN — 3 segs (data-driven knots",    (f) => predictPiecewiseModel("linear_3seg_optimal", f)],
+  ["Piecewise LIN — 4 segs (data-driven knots",    (f) => predictPiecewiseModel("linear_4seg_optimal", f)],
+  ["Piecewise POLY-2 — 4 segs (data-driven knots", (f) => predictPiecewiseModel("poly2_4seg_optimal",  f)],
 ];
 function lookupFn(name) {
   if (PREDICT_BY_NAME[name]) return PREDICT_BY_NAME[name];
@@ -436,45 +529,47 @@ const METRIC_BY_NAME = {};
 M.results.forEach(r => { METRIC_BY_NAME[r.model] = { MAE: r.MAE, RMSE: r.RMSE }; });
 const bestName = M.results.slice().sort((a, b) => a.MAE - b.MAE)[0].model;
 
-// Apply home-court advantage on top of any model's prediction
+// Home-court adjustment.  When the deployed models include is_home as a
+// trained feature (new pipeline), HCA is already in the prediction and we
+// skip this shim; otherwise we add HCA_PTS to the home team post-hoc.
 function withHCA(predA, predB) {
+  if (modelsKnowHome()) return [predA, predB];
   if (predA == null || predB == null) return [predA, predB];
   if (homeTeam === "A") return [predA + HCA_PTS, predB];
   if (homeTeam === "B") return [predA, predB + HCA_PTS];
   return [predA, predB];
 }
 
-// "Last N min" mode: project from the recent slope only.
-// Uses parsed PBP if available, otherwise falls back to (current / elapsed)
-// scaled by the recent fraction (degrades gracefully).
-function recentSlopeProjection(elapsed, currentScore, ppg, lookbackMin) {
-  if (elapsed <= 0) return ppg;            // game hasn't started
+// "Last N min" mode = project from a recent slope only.  With PBP loaded
+// the slope comes straight from per-minute scoreA/scoreB arrays; otherwise
+// we fall back to a uniform-rate estimate.  Returns the projected final
+// score for the given side ("A" or "B").
+function recentSlopeProjection(elapsed, currentScore, fallbackPPG, lookbackMin, side) {
+  if (elapsed <= 0) return fallbackPPG;
   let scoreAtLookback = null;
   if (pbpData) {
-    const idx = Math.max(0, elapsed - lookbackMin);
-    const arr = pbpData.team === "A" ? pbpData.scoreA : pbpData.scoreB;
-    if (arr) scoreAtLookback = arr[Math.floor(idx)] ?? null;
+    const arr = side === "A" ? pbpData.scoreA : pbpData.scoreB;
+    const idx = Math.max(0, Math.floor(elapsed - lookbackMin));
+    if (arr) scoreAtLookback = arr[idx] ?? null;
   }
   if (scoreAtLookback == null) {
-    // No PBP — assume scoring up to now was uniform (best we can do)
     scoreAtLookback = currentScore * Math.max(0, (elapsed - lookbackMin)) / elapsed;
   }
-  const recentSlope = (currentScore - scoreAtLookback) / Math.min(lookbackMin, elapsed);
-  return currentScore + recentSlope * (GAME - elapsed);
+  const slope = (currentScore - scoreAtLookback) / Math.min(lookbackMin, elapsed);
+  return currentScore + slope * (GAME - elapsed);
 }
 
-function maybeApplyMode(predFn, elapsed, score, ppg, isTeamA) {
-  if (projMode === "full") return predFn(elapsed, score, ppg);
-  // For non-full modes, swap in the recent-slope projection.
-  // Note: pbpData.team distinguishes which team's PBP series to use.
+// Apply the projection mode wrapper.  In "full" mode we run the model on
+// the full feature dictionary (so it consumes recent slopes, opponent
+// strength, home flag, all three priors, etc).  In "last5/last10" mode we
+// override with the simple recent-slope extrapolation.
+function maybeApplyMode(predFn, featDict, side) {
+  if (projMode === "full") return predFn(featDict);
   const lookback = projMode === "last5" ? 5 : 10;
-  const teamSide = isTeamA ? "A" : "B";
-  // Temporarily override pbpData.team so recentSlopeProjection picks the right series
-  const saved = pbpData ? pbpData.team : null;
-  if (pbpData) pbpData.team = teamSide;
-  const out = recentSlopeProjection(elapsed, score, ppg, lookback);
-  if (pbpData) pbpData.team = saved;
-  return out;
+  return recentSlopeProjection(
+    featDict.minute, featDict.current_score,
+    featDict.team_ppg_weighted ?? featDict.team_ppg,
+    lookback, side);
 }
 
 // ---------- Chart setup ----------
@@ -544,14 +639,20 @@ function update() {
   document.getElementById("timeCtx").innerHTML =
     `<strong>${quarterLabel(elapsed)}</strong> · ${(GAME - elapsed).toFixed(1)} min left`;
 
+  // Build per-team feature dicts ONCE per render — every model reads from these.
+  const tA = M.teams.find(t => t.name === teamA.value);
+  const tB = M.teams.find(t => t.name === teamB.value);
+  const featA = buildFeatureDict(tA, tB, elapsed, sA, homeTeam === "A", "A");
+  const featB = buildFeatureDict(tB, tA, elapsed, sB, homeTeam === "B", "B");
+
   // Model table — filter by group selector
   const tbody = document.getElementById("modelTable");
   tbody.innerHTML = "";
   let bestProjA = null, bestProjB = null;
   const filtered = filterModels(MODEL_DEFS);
   filtered.forEach(m => {
-    let a = maybeApplyMode(m.fn, elapsed, sA, ppgA, true);
-    let b = maybeApplyMode(m.fn, elapsed, sB, ppgB, false);
+    let a = maybeApplyMode(m.fn, featA, "A");
+    let b = maybeApplyMode(m.fn, featB, "B");
     [a, b] = withHCA(a, b);
     const tot = (a == null || b == null) ? null : a + b;
     const metric = METRIC_BY_NAME[m.name] || {};
@@ -584,14 +685,16 @@ function update() {
     chart.data.datasets[idx].hidden = false;
     const series = [];
     for (let mm = 0; mm <= GAME; mm++) {
-      let scoreA, scoreB;
+      let scoreAtMA, scoreAtMB;
       if (mm <= elapsed) {
         const f = elapsed > 0 ? mm / elapsed : 0;
-        scoreA = sA * f;
-        scoreB = sB * f;
-      } else { scoreA = sA; scoreB = sB; }
-      let a = m.fn(mm, scoreA, ppgA);
-      let b = m.fn(mm, scoreB, ppgB);
+        scoreAtMA = sA * f;
+        scoreAtMB = sB * f;
+      } else { scoreAtMA = sA; scoreAtMB = sB; }
+      const fA = buildFeatureDict(tA, tB, mm, scoreAtMA, homeTeam === "A", "A");
+      const fB = buildFeatureDict(tB, tA, mm, scoreAtMB, homeTeam === "B", "B");
+      let a = m.fn(fA);
+      let b = m.fn(fB);
       [a, b] = withHCA(a, b);
       series.push((a == null || b == null) ? null : a + b);
     }
