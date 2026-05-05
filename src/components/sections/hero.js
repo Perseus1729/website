@@ -78,7 +78,7 @@ and algorithmic systems. Currently, I’m focused on exploring AI-driven innovat
   const five = (
     <a
       className="email-link"
-      href="mailto:hiteshkumarpunna1@example.com"
+      href="mailto:hiteshkumarpunna1@gmail.com"
       target="_blank"
       rel="noopener noreferrer">
       Get in Touch!

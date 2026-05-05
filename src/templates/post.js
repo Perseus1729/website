@@ -59,10 +59,10 @@ const PostTemplate = ({ data, location }) => {
       <Helmet title={title} />
 
       <StyledPostContainer>
-        <span className="breadcrumb">
+        {/* <span className="breadcrumb">
           <span className="arrow">&larr;</span>
           <Link to="/pensieve">All memories</Link>
-        </span>
+        </span> */}
 
         <StyledPostHeader>
           <h1 className="medium-heading">{title}</h1>
@@ -75,13 +75,13 @@ const PostTemplate = ({ data, location }) => {
               })}
             </time>
             <span>&nbsp;&mdash;&nbsp;</span>
-            {tags &&
+            {/* {tags &&
               tags.length > 0 &&
               tags.map((tag, i) => (
                 <Link key={i} to={`/pensieve/tags/${kebabCase(tag)}/`} className="tag">
                   #{tag}
                 </Link>
-              ))}
+              ))} */}
           </p>
         </StyledPostHeader>
 

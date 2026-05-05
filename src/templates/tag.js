@@ -54,16 +54,16 @@ const TagTemplate = ({ pageContext, data, location }) => {
       <Helmet title={`Tagged: #${tag}`} />
 
       <StyledTagsContainer>
-        <span className="breadcrumb">
+        {/* <span className="breadcrumb">
           <span className="arrow">&larr;</span>
           <Link to="/pensieve">All memories</Link>
-        </span>
+        </span> */}
 
         <h1>
           <span>#{tag}</span>
-          <span>
+          {/* <span>
             <Link to="/pensieve/tags">View all tags</Link>
-          </span>
+          </span> */}
         </h1>
 
         <ul className="fancy-list">
@@ -83,13 +83,13 @@ const TagTemplate = ({ pageContext, data, location }) => {
                     })}
                   </time>
                   <span>&nbsp;&mdash;&nbsp;</span>
-                  {tags &&
+                  {/* {tags &&
                     tags.length > 0 &&
                     tags.map((tag, i) => (
                       <Link key={i} to={`/pensieve/tags/${kebabCase(tag)}/`} className="tag">
                         #{tag}
                       </Link>
-                    ))}
+                    ))} */}
                 </p>
               </li>
             );

@@ -1,12 +1,10 @@
 ---
-title: Accessible Clickable Cards
-description: Clickable cards with multiple child links
-date: 2021-04-21
+title: "Clickable Cards"
+date: "2025-03-28"
+description: "A guide to clickable cards."
+slug: "/pensieve/clickable-cards/"
+tags: ["React", "CSS"]
 draft: false
-slug: /pensieve/clickable-cards
-tags:
-  - Accessibility
-  - CSS
 ---
 
 [Codepen Demo](https://codepen.io/bchiang7/pen/xxRBvgd?editors=1100)

@@ -14,7 +14,7 @@ const IconLogo = () => (
           points="39 0 0 22 0 67 39 90 78 68 78 23"
         />
         {/* Larger Letter H Centered */}
-        <g transform="translate(22, 33) scale(1.3)"> 
+        <g transform="translate(20, 30) scale(1.3)"> 
           <path
             d="M5 0 V24 H10 V12 H20 V24 H25 V0 H20 V10 H10 V0 Z"
             fill="currentColor"

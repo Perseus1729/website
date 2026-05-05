@@ -5,7 +5,7 @@ module.exports = {
     title: 'Hitesh Kumar',
     description:
       'Hitesh Kumar is a software engineer who specializes in building (and occasionally designing) exceptional digital experiences.',
-    siteUrl: 'https://hiteshkumar.com', // No trailing slash allowed!
+    siteUrl: 'https://hiteshkumar.vercel.app', // No trailing slash allowed!
     image: '/og.png', // Path to your image you placed in the 'static' folder
     twitterUsername: '@bchiang7',
   },
@@ -147,12 +147,6 @@ module.exports = {
             },
           },
         ],
-      },
-    },
-    {
-      resolve: `gatsby-plugin-google-analytics`,
-      options: {
-        trackingId: 'UA-45666519-2',
       },
     },
   ],

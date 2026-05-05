@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+Sitemap: https://hiteshkumar.vercel.app/sitemap.xml
+Host: https://hiteshkumar.vercel.app/
